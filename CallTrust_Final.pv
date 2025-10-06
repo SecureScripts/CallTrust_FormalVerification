@@ -70,10 +70,12 @@ table cs_seedtable(phone, bitstring).
 
 
 (* --- Events --- *)
-
-event u_validating_hmac(phone,phone,bitstring).
-event cs_call_involved(phone,phone,bitstring).
-
+event AP_issue_certificate_u(phone, spkey, bitstring).
+event u_contact_AP(phone, spkey, bitstring).
+event u_validate_hmac(phone,phone,bitstring,nonce).
+event cs_call_involved(phone,phone,bitstring,nonce).
+event TLP_send_info(phone, pkey, nonce).
+event u_validate_info(phone, pkey, nonce).
 
 (* AP should only validate a user if that user actually began a session *)
 (*query x: phone, pk: spkey;
@@ -84,10 +86,16 @@ query attacker ( secretMessage ).
 
 fun bitstring_to_nonce ( bitstring ) : nonce [ data , typeConverter ]. 
 
-query x: phone, y: phone, s:bitstring;
-  inj-event(u_validating_hmac(x, y, s)) ==> inj-event(cs_call_involved(x, y, s)).
+query x: phone, y: phone, s:bitstring, k:nonce;
+  inj-event(u_validate_hmac(x, y, s, k)) ==> inj-event(cs_call_involved(x, y, s, k)).
 
-query  x: phone, y: phone, s:bitstring; event(u_validating_hmac(x, y, s)).
+query x: phone, y: spkey, s:bitstring;
+  inj-event(AP_issue_certificate_u(x, y, s)) ==> inj-event(u_contact_AP(x, y, s)).
+
+query x: phone, y: pkey, k:nonce;
+  inj-event(u_validate_info(x, y, k)) ==> inj-event(TLP_send_info(x, y, k)).
+
+query  x: phone, y: phone, s:bitstring, k:nonce; event(u_validate_hmac(x, y, s, k)).
 
 
 
@@ -117,15 +125,15 @@ let Ufollowing(n_x: phone, n_y: phone, pk_u: spkey, sk_u: sskey, spkTL: spkey, c
 
   let Z = (n_x, n_y) in
   if hmac(s, Z) = mac_recv then (
-   if n_x = n_CS || n_y=n_CS then event u_validating_hmac(n_x, n_y, s); 
+   if n_x = n_CS || n_y=n_CS then event u_validate_hmac(n_x, n_y, s, k_uc); 
    out( c , sencrypt(secretMessage, bitstring_to_nonce(s)))
   ) else 0.
 
 
 let CSfollowing(n_x: phone, n_y: phone, skCS_enc: skey, spkAP: spkey, pkCS: pkey, seed: bitstring) =
-  event cs_call_involved(n_x, n_y, seed);
   in(c, (enc_kuc: bitstring, enc_cert: bitstring));
   let (=c_kuc, k_uc : nonce) = adec(enc_kuc, skCS_enc) in
+  event cs_call_involved(n_x, n_y, seed, k_uc);
   let (=c_fwdcert, certA : bitstring) = sdecrypt(enc_cert, k_uc) in
   let (=c_cert, nu_phone: phone, pk_u : spkey) = checksign(certA, spkAP) in
   if (n_x = n_CS && nu_phone = n_y ) || (n_y = n_CS && nu_phone = n_x ) then
@@ -157,6 +165,7 @@ let processU(pkAP : pkey, spkAP : spkey, spkTL : spkey,
 
   (* Msg 2 *)
   in(tel_priv, OTP : bitstring);
+  event u_contact_AP(n_u, pk_u, OTP); 
 
   (* Msg 3 *)
   out(c, sencrypt( (c_pkuotp, pk_u, OTP), k_up ));
@@ -171,9 +180,11 @@ let processU(pkAP : pkey, spkAP : spkey, spkTL : spkey,
 
   if n_x= n_u || n_y=n_u then
     let other: phone = choose(n_x, n_y, n_u) in
-    out(c, other);
+    new nonce_u : nonce;
+    out(c, (other, nonce_u) );
     in(c, ms7: bitstring);
-    let (=c_pb, =other, pk_other : pkey) = checksign(ms7, spkTL) in
+    let (=c_pb, =other, pk_other : pkey, =nonce_u) = checksign(ms7, spkTL) in
+    event u_validate_info(other, pk_other, nonce_u);
     Ufollowing(n_x, n_y, pk_u, sk_u, spkTL, cert_from_AP, pk_other).
 
 
@@ -191,6 +202,7 @@ let processAP(skAP_enc : skey, skAP_sig : sskey) =
   in(c, m3: bitstring);
   let (=c_pkuotp, pk_u : spkey, otp2 : bitstring) = sdecrypt(m3, k_up) in
   if otp2 = OTP then (
+    event AP_issue_certificate_u(nu_phone, pk_u, OTP); 
     out(c, sign( (c_cert, nu_phone, pk_u), skAP_sig ))
   ) else 0.
 
@@ -198,9 +210,10 @@ let processAP(skAP_enc : skey, skAP_sig : sskey) =
    Role: TLP (unchanged)
 ----------------------------------------------------------------------------- *)
 let processTLP(skTL_sig : sskey) =
-  in(c, num: phone);
+  in(c, (num: phone, nonce_u: nonce));
   get phonebook(=num, pk_num : pkey) in
-  out(c, sign( (c_pb, num, pk_num), skTL_sig )).
+  event TLP_send_info(num, pk_num, nonce_u);
+  out(c, sign( (c_pb, num, pk_num, nonce_u), skTL_sig )).
 
 (* -----------------------------------------------------------------------------
    Role: CS
